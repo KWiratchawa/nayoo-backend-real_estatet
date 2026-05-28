@@ -1,7 +1,7 @@
 """PDF report generation - ReportLab (pure Python, no apt deps)"""
 from io import BytesIO
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from reportlab.lib.pagesizes import A4
@@ -13,7 +13,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 
-from app.auth import get_current_agent
 from app.db import get_supabase
 
 router = APIRouter()
@@ -205,11 +204,10 @@ def build_pdf(listing: dict, calc: dict) -> bytes:
 @router.get("/{listing_id}/generate")
 async def generate_pdf(
     listing_id: str,
-    agent: dict = Depends(get_current_agent),
 ):
     """Generate PDF + download"""
     sb = get_supabase()
-    res = sb.table("listings").select("*").eq("id", listing_id).eq("agent_id", agent["id"]).execute()
+    res = sb.table("listings").select("*").eq("id", listing_id).execute()
     if not res.data:
         raise HTTPException(404, "ไม่พบ listing")
     listing = res.data[0]

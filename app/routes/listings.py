@@ -1,16 +1,18 @@
-"""Listings CRUD - via Supabase RLS"""
+"""Listings CRUD - ไม่ต้อง auth (รับ user_id จาก request body/query)"""
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.auth import get_current_agent
 from app.db import get_supabase
 
 router = APIRouter()
 
 
 class ListingCreate(BaseModel):
-    workflow_type: str
+    user_id: str
+    seller_name: Optional[str] = None  # ถ้านายหน้า — กรอกชื่อผู้ขาย (optional)
+
+    workflow_type: str  # 'transfer' | 'leaseback'
 
     # Location
     province_id: Optional[int] = None
@@ -20,7 +22,7 @@ class ListingCreate(BaseModel):
     longitude: Optional[float] = None
     latitude: Optional[float] = None
 
-    # Seller
+    # Seller calc inputs
     seller_type: str
     acquisition_type: str
     acquisition_subtype: Optional[str] = None
@@ -58,7 +60,7 @@ class ListingCreate(BaseModel):
     has_mortgage: bool = False
     mortgage_amount: Optional[float] = None
 
-    # WF2 specific
+    # WF2 only
     expected_market_price: Optional[float] = None
     interest_rate_monthly: Optional[float] = None
     total_term_months: Optional[int] = None
@@ -69,14 +71,10 @@ class ListingCreate(BaseModel):
 
 
 @router.post("")
-async def create_listing(
-    data: ListingCreate,
-    agent: dict = Depends(get_current_agent),
-):
-    """สร้าง listing — auto-generate listing_no"""
+async def create_listing(data: ListingCreate):
+    """สร้าง listing — แนบ user_id"""
     sb = get_supabase()
     payload = data.model_dump(exclude_none=True)
-    payload["agent_id"] = agent["id"]
     payload["status"] = "submitted"
 
     res = sb.table("listings").insert(payload).execute()
@@ -86,36 +84,30 @@ async def create_listing(
 
 
 @router.get("")
-async def list_my_listings(
-    agent: dict = Depends(get_current_agent),
+async def list_user_listings(
+    user_id: str = Query(..., description="UUID ของ user"),
     workflow_type: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
 ):
-    """ดู listings ของตัวเอง"""
+    """ดู listings ของ user คนนี้ (ใช้ใน admin/EditProfile — frontend ปกติไม่ใช้)"""
     sb = get_supabase()
     q = (
         sb.table("listings")
         .select("*")
-        .eq("agent_id", agent["id"])
+        .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(limit)
     )
     if workflow_type:
         q = q.eq("workflow_type", workflow_type)
-    if status:
-        q = q.eq("status", status)
     return q.execute().data
 
 
 @router.get("/{listing_id}")
-async def get_listing(
-    listing_id: str,
-    agent: dict = Depends(get_current_agent),
-):
-    """ดู listing + calc ล่าสุด"""
+async def get_listing(listing_id: str):
+    """ดู listing + calc ล่าสุด — ใช้ตอน generate PDF"""
     sb = get_supabase()
-    res = sb.table("listings").select("*").eq("id", listing_id).eq("agent_id", agent["id"]).execute()
+    res = sb.table("listings").select("*").eq("id", listing_id).execute()
     if not res.data:
         raise HTTPException(404, "ไม่พบ listing")
     listing = res.data[0]
@@ -133,14 +125,12 @@ async def get_listing(
 
 
 @router.post("/{listing_id}/calculations")
-async def save_calculation(
-    listing_id: str,
-    calc_data: dict,
-    agent: dict = Depends(get_current_agent),
-):
+async def save_calculation(listing_id: str, calc_data: dict):
     """บันทึก calculation"""
     sb = get_supabase()
-    res = sb.table("listings").select("id").eq("id", listing_id).eq("agent_id", agent["id"]).execute()
+
+    # ตรวจ listing exists
+    res = sb.table("listings").select("id").eq("id", listing_id).execute()
     if not res.data:
         raise HTTPException(404, "ไม่พบ listing")
 
