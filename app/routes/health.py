@@ -1,13 +1,13 @@
-"""Health check - UptimeRobot ping target"""
-from fastapi import APIRouter
+"""Health check - UptimeRobot ping target (รองรับทั้ง GET + HEAD)"""
+from fastapi import APIRouter, Response
 from app.db import get_sqlite
 
 router = APIRouter()
 
 
-@router.get("/health")
-async def health():
-    """Public health check"""
+@router.api_route("/health", methods=["GET", "HEAD"])
+async def health(response: Response):
+    """Public health check - รองรับ HEAD (UptimeRobot ใช้ HEAD)"""
     sqlite_ok = False
     try:
         get_sqlite().execute("SELECT 1").fetchone()
