@@ -1,0 +1,2 @@
+# SQLite database files are downloaded here at build time.
+# See scripts/download_appraisal.py
