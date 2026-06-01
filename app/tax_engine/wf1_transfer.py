@@ -3,12 +3,16 @@ tax_engine.wf1_transfer
 ~~~~~~~~~~~~~~~~~~~~~~~
 Workflow 1: คำนวณค่าใช้จ่ายวันโอน
 
-ครอบคลุม:
-  1. ค่าธรรมเนียมโอน (2% ของราคาประเมิน)
-  2. ค่าคำขอ + พยาน (25 บาท)
-  3. ภาษีเงินได้หัก ณ ที่จ่าย (บุคคลธรรมดา / นิติบุคคล)
-  4. SBT 3.3% หรือ อากรแสตมป์ 0.5% (เลือกอย่างใดอย่างหนึ่ง)
-  5. ค่าจดจำนอง 1% (ถ้ามี)
+ครอบคลุม 6 cases:
+นิติบุคคล (2 cases):
+  1. ทรัพย์ทั่วไป/สินค้า (ไม่ว่าถือกี่ปี) หรือ สินทรัพย์ถาวร < 5 ปี → SBT 3.3%
+  2. สินทรัพย์ถาวร ≥ 5 ปี → ยกเว้น SBT → อากรแสตมป์ 0.5%
+
+บุคคลธรรมดา (4 cases):
+  1. ซื้อมาเอง + ถือ <5 ปี และทะเบียนบ้าน <1 ปี → SBT 3.3%
+  2. ซื้อมาเอง + ถือ ≥5 ปี หรือทะเบียนบ้าน ≥1 ปี → อากรแสตมป์ 0.5%
+  3. มรดก (ไม่ว่าถือกี่ปี) → ยกเว้น SBT เสมอ → อากรแสตมป์ 0.5%
+  4. ให้โดยเสน่หา → ถือ <5 ปี = SBT 3.3%, ≥5 ปี = อากรแสตมป์ 0.5%
 """
 from decimal import Decimal
 
@@ -31,6 +35,7 @@ from .config import (
 )
 from .models import (
     AcquisitionType,
+    CorporateAssetType,
     CostLineItem,
     CostResponsibility,
     SellerType,
@@ -47,47 +52,19 @@ from .utils import (
 )
 
 
-# ============================================================================
-# 1. ค่าธรรมเนียมโอน 2%
-# ============================================================================
-
 def calculate_transfer_fee(appraisal_price: Decimal, sale_price: Decimal) -> Decimal:
-    """
-    ค่าธรรมเนียมการโอน = 2% × MAX(ราคาขาย, ราคาประเมินกรมที่ดิน)
-
-    Business Rule: ระบบใช้ MAX สำหรับทุก calculation เพื่อ conservative estimate
-    Source: แนวคิดค่าใช้จ่ายวันโอน.pdf + business decision
-    """
     base = max_decimal(sale_price, appraisal_price)
     return round_money(base * TRANSFER_FEE_RATE)
 
 
-# ============================================================================
-# 2. ค่าจดจำนอง 1%
-# ============================================================================
-
 def calculate_mortgage_fee(mortgage_amount: Decimal) -> Decimal:
-    """
-    ค่าจดจำนอง = 1% ของวงเงินจำนอง
-    Source: แนวคิดค่าใช้จ่ายวันโอน.pdf
-    """
     return round_money(mortgage_amount * MORTGAGE_FEE_RATE)
 
 
-# ============================================================================
-# 3. WHT บุคคลธรรมดา (มี 3 สูตรย่อยตามประเภทการได้มา)
-# ============================================================================
-
 def _get_deduction_rate_bought(holding_years: int) -> Decimal:
-    """
-    หาอัตราหักค่าใช้จ่ายตามปีถือครอง สำหรับกรณี "ซื้อมาเอง"
-    ตามพ.ร.ฎ. 165 → 1ปี=92%, 2ปี=84%, ..., 8ปี+=50%
-
-    Source: การคำนวณภาษีเงินได้บุคคลธรรมดาสำหรับอสังหาฯที่ไม่ใช่มรดก.pdf
-    """
     if holding_years >= 8:
         return DEDUCTION_RATES_BY_HOLDING_YEAR[8]
-    return DEDUCTION_RATES_BY_HOLDING_YEAR[holding_years]
+    return DEDUCTION_RATES_BY_HOLDING_YEAR[max(holding_years, 1)]
 
 
 def calculate_wht_individual(
@@ -98,74 +75,37 @@ def calculate_wht_individual(
     is_in_bangkok_metro: bool,
     has_intent_to_trade: bool,
 ) -> WhtCalculationDetail:
-    """
-    คำนวณ WHT บุคคลธรรมดาตาม ป.100/2543 ข้อ 6
-
-    ขั้นตอน:
-      1. เงินได้ = ราคาประเมิน (มาตรา 49 ทวิ)
-         - ถ้ามรดก/ให้ + นอกเขต กทม. → หัก exemption 200K
-      2. หักค่าใช้จ่าย:
-         - มรดก / ให้โดยเสน่หา → 50% เสมอ
-         - ซื้อมาเอง → ตามปีถือครอง (92%-50%)
-      3. เงินได้สุทธิ ÷ ปีถือครอง = เงินได้เฉลี่ยต่อปี
-      4. คำนวณภาษีตามอัตราก้าวหน้า (ไม่ยกเว้น 150K แรก) × ปีถือครอง
-      5. ถ้า has_intent_to_trade=False → ใช้เพดาน 20% ของราคาขาย
-
-    Args:
-        appraisal_price: ราคาประเมินกรมธนารักษ์
-        sale_price: ราคาขายที่ตกลง (ใช้คำนวณเพดาน)
-        acquisition_type: ประเภทการได้มา
-        holding_years: ปีถือครอง (1-10)
-        is_in_bangkok_metro: อยู่ในเขต กทม./เทศบาล/พัทยา หรือไม่
-        has_intent_to_trade: มุ่งค้าหากำไรหรือไม่
-
-    Returns:
-        WhtCalculationDetail พร้อมขั้นตอนการคำนวณครบ
-    """
-    # --- ขั้นที่ 1: เงินได้ = MAX(ราคาขาย, ราคาประเมิน) + exemption (ถ้ามี) ---
-    # Business Rule: ใช้ MAX เป็น tax base สำหรับทุก calculation
+    """WHT บุคคลธรรมดา (ตาม ป.100/2543 ข้อ 6)"""
     exemption = Decimal("0")
     if acquisition_type in (AcquisitionType.INHERITED, AcquisitionType.GIFT):
-        # มรดก / ให้โดยเสน่หา นอกเขต → ยกเว้น 200K
-        # Source: ป.100/2543 ข้อ 10(3)
         if not is_in_bangkok_metro:
             exemption = WHT_NON_BKK_EXEMPTION
 
     tax_base = max_decimal(sale_price, appraisal_price)
     income = max(Decimal("0"), tax_base - exemption)
 
-    # --- ขั้นที่ 2: หักค่าใช้จ่าย ---
     if acquisition_type in (AcquisitionType.INHERITED, AcquisitionType.GIFT):
         deduction_rate = INHERITED_DEDUCTION_RATE
-        deduction_basis = "มรดก/ให้โดยเสน่หา หักเหมา 50% (ป.100/2543 ข้อ 6(1))"
-    else:  # BOUGHT
-        deduction_rate = _get_deduction_rate_bought(holding_years)
-        deduction_basis = (
-            f"ซื้อมาเอง หักตามพ.ร.ฎ.165 ที่ {holding_years} ปี = {deduction_rate*100}%"
-        )
+        deduction_basis = "มรดก/ให้โดยเสน่หา หักเหมา 50%"
+    else:
+        deduction_rate = _get_deduction_rate_bought(max(holding_years, 1))
+        deduction_basis = f"ซื้อมาเอง หักตามพ.ร.ฎ.165 ที่ {holding_years} ปี = {deduction_rate*100}%"
 
     deduction_amount = income * deduction_rate
     net_income = income - deduction_amount
 
-    # --- ขั้นที่ 3: เงินได้เฉลี่ยต่อปี ---
-    income_per_year = net_income / Decimal(holding_years) if holding_years > 0 else net_income
+    holding_for_calc = max(holding_years, 1)
+    income_per_year = net_income / Decimal(holding_for_calc)
 
-    # --- ขั้นที่ 4: คำนวณภาษีตามขั้นบันได × ปีถือครอง ---
-    # ไม่ยกเว้น 150K แรก → ใช้ WHT_REAL_ESTATE_BRACKETS (collapse 0-150K เข้า 5%)
     tax_per_year = calculate_progressive_tax(income_per_year, WHT_REAL_ESTATE_BRACKETS)
-    total_tax_before_cap = tax_per_year * Decimal(holding_years)
+    total_tax_before_cap = tax_per_year * Decimal(holding_for_calc)
 
-    # --- ขั้นที่ 5: เพดาน 20% ของราคาขาย ---
-    # Source: ป.100/2543 ข้อ 6 วรรค 4
-    # เฉพาะกรณี "ไม่มุ่งค้าหากำไร"
     wht_cap = sale_price * WHT_CAP_RATE
 
     if has_intent_to_trade:
-        # มุ่งค้าหากำไร → ไม่ใช้เพดาน
         final_tax = total_tax_before_cap
         cap_applied = False
     else:
-        # ไม่มุ่งค้าหากำไร → ใช้เพดาน
         final_tax = min(total_tax_before_cap, wht_cap)
         cap_applied = total_tax_before_cap > wht_cap
 
@@ -187,24 +127,17 @@ def calculate_wht_individual(
     )
 
 
-# ============================================================================
-# 4. WHT นิติบุคคล
-# ============================================================================
-
 def calculate_wht_corporate(
     sale_price: Decimal,
     appraisal_price: Decimal,
 ) -> WhtCalculationDetail:
-    """
-    WHT นิติบุคคล = 1% × MAX(ราคาขาย, ราคาประเมิน)
-    Source: แนวคิดค่าใช้จ่ายวันโอน.pdf (ตารางนิติบุคคล)
-    """
+    """WHT นิติบุคคล = 1% × MAX(ราคาขาย, ราคาประเมิน)"""
     base = max_decimal(sale_price, appraisal_price)
     tax = base * WHT_CORPORATE_RATE
 
     return WhtCalculationDetail(
         seller_type=SellerType.CORPORATE,
-        holding_years=0,  # ไม่ใช้
+        holding_years=0,
         income=base,
         deduction_rate=Decimal("0"),
         deduction_amount=Decimal("0"),
@@ -220,142 +153,115 @@ def calculate_wht_corporate(
     )
 
 
-# ============================================================================
-# 5. ตัดสินใจ SBT vs อากรแสตมป์
-# ============================================================================
-
 def decide_sbt_or_stamp(
     seller_type: SellerType,
     acquisition_type: AcquisitionType,
+    corporate_asset_type: CorporateAssetType | None,
     holding_years: int,
     years_in_household_registration: int,
 ) -> tuple[TaxChoice, str]:
     """
-    ตัดสินใจว่าจะเสีย SBT หรือ อากรแสตมป์
-    Source: แนวคิดค่าใช้จ่ายวันโอน.pdf
+    ตัดสินใจ SBT vs อากรแสตมป์ (6 cases)
 
-    กฎ:
-    - มรดก → ยกเว้น SBT เสมอ → อากรแสตมป์ 0.5% (ไม่ว่าถือกี่ปี)
-    - ให้โดยเสน่หา → ถือ < 5 ปี = SBT, ถือ > 5 ปี = อากร
-    - ซื้อมาเอง (บุคคล) → ถือ ≤ 5 ปี + ชื่อในทะเบียนบ้าน < 1 ปี = SBT
-                          → ถือ > 5 ปี หรือ ชื่อในทะเบียน ≥ 1 ปี = อากร
-    - นิติบุคคล → ถือ ≤ 5 ปี = SBT, ถือ > 5 ปี (สินทรัพย์ถาวร) = อากร
+    นิติบุคคล:
+      - ทรัพย์ทั่วไป/สินค้า → SBT เสมอ (ไม่ว่าถือกี่ปี)
+      - สินทรัพย์ถาวร + ถือ < 5 ปี → SBT
+      - สินทรัพย์ถาวร + ถือ ≥ 5 ปี → อากรแสตมป์
 
-    Returns:
-        (TaxChoice, เหตุผล)
+    บุคคลธรรมดา:
+      - มรดก → อากรแสตมป์เสมอ (ไม่ว่าถือกี่ปี)
+      - ให้โดยเสน่หา + ถือ < 5 ปี → SBT
+      - ให้โดยเสน่หา + ถือ ≥ 5 ปี → อากรแสตมป์
+      - ซื้อมาเอง + ถือ < 5 ปี และ ทะเบียนบ้าน < 1 ปี → SBT
+      - ซื้อมาเอง + ถือ ≥ 5 ปี หรือ ทะเบียนบ้าน ≥ 1 ปี → อากรแสตมป์
     """
-    # มรดก: ยกเว้น SBT เสมอ
-    if acquisition_type == AcquisitionType.INHERITED:
-        return TaxChoice.STAMP, "มรดก → ยกเว้น SBT เสมอ (ไม่ว่าถือกี่ปี) เสียอากรแสตมป์ 0.5%"
+    # ============ นิติบุคคล ============
+    if seller_type == SellerType.CORPORATE:
+        # default: ถ้าไม่ระบุ → GENERAL (เก็บ SBT)
+        asset_type = corporate_asset_type or CorporateAssetType.GENERAL
 
-    # ให้โดยเสน่หา: ดูตามปีถือครองอย่างเดียว
-    if acquisition_type == AcquisitionType.GIFT:
-        if holding_years <= SBT_HOLDING_YEAR_THRESHOLD:
+        if asset_type == CorporateAssetType.GENERAL:
             return (
                 TaxChoice.SBT,
-                f"ให้โดยเสน่หา + ถือ {holding_years} ปี (≤ 5 ปี) → SBT 3.3%"
+                f"นิติบุคคล + ทรัพย์ทั่วไป/สินค้า (ไม่ว่าถือกี่ปี) → SBT 3.3%"
+            )
+
+        # FIXED_ASSET (สินทรัพย์ถาวร)
+        if holding_years < SBT_HOLDING_YEAR_THRESHOLD:
+            return (
+                TaxChoice.SBT,
+                f"นิติบุคคล + สินทรัพย์ถาวร + ถือ {holding_years} ปี (< 5 ปี) → SBT 3.3%"
             )
         return (
             TaxChoice.STAMP,
-            f"ให้โดยเสน่หา + ถือ {holding_years} ปี (> 5 ปี) → อากรแสตมป์ 0.5%"
+            f"นิติบุคคล + สินทรัพย์ถาวร + ถือ {holding_years} ปี (≥ 5 ปี) → อากรแสตมป์ 0.5%"
         )
 
-    # ซื้อมาเอง (บุคคล)
-    if seller_type == SellerType.INDIVIDUAL:
-        # ต้องเข้าทั้ง 2 เงื่อนไขถึงเสีย SBT:
-        # 1) ถือ ≤ 5 ปี
-        # 2) ชื่อในทะเบียนบ้าน < 1 ปี
-        long_holding = holding_years > SBT_HOLDING_YEAR_THRESHOLD
-        long_residency = (
-            years_in_household_registration >= HOUSEHOLD_REGISTRATION_THRESHOLD_YEARS
-        )
+    # ============ บุคคลธรรมดา ============
 
-        if long_holding or long_residency:
-            reason_parts = []
-            if long_holding:
-                reason_parts.append(f"ถือครอง {holding_years} ปี > 5 ปี")
-            if long_residency:
-                reason_parts.append(
-                    f"ชื่อในทะเบียนบ้าน {years_in_household_registration} ปี ≥ 1 ปี"
-                )
+    # มรดก: ยกเว้น SBT เสมอ
+    if acquisition_type == AcquisitionType.INHERITED:
+        return TaxChoice.STAMP, "มรดก → ยกเว้น SBT เสมอ → อากรแสตมป์ 0.5%"
+
+    # ให้โดยเสน่หา
+    if acquisition_type == AcquisitionType.GIFT:
+        if holding_years < SBT_HOLDING_YEAR_THRESHOLD:
             return (
-                TaxChoice.STAMP,
-                "ซื้อมาเอง + " + " หรือ ".join(reason_parts) + " → อากรแสตมป์ 0.5%"
+                TaxChoice.SBT,
+                f"ให้โดยเสน่หา + ถือ {holding_years} ปี (< 5 ปี) → SBT 3.3%"
             )
-
         return (
-            TaxChoice.SBT,
-            f"ซื้อมาเอง + ถือ {holding_years} ปี ≤ 5 ปี + "
-            f"ทะเบียนบ้าน {years_in_household_registration} ปี < 1 ปี → SBT 3.3%"
+            TaxChoice.STAMP,
+            f"ให้โดยเสน่หา + ถือ {holding_years} ปี (≥ 5 ปี) → อากรแสตมป์ 0.5%"
         )
 
-    # นิติบุคคล: ดูปีถือครองอย่างเดียว
-    if holding_years <= SBT_HOLDING_YEAR_THRESHOLD:
-        return TaxChoice.SBT, f"นิติบุคคล + ถือ {holding_years} ปี ≤ 5 ปี → SBT 3.3%"
-    return TaxChoice.STAMP, f"นิติบุคคล + ถือ {holding_years} ปี > 5 ปี → อากรแสตมป์ 0.5%"
+    # ซื้อมาเอง (BOUGHT)
+    long_holding = holding_years >= SBT_HOLDING_YEAR_THRESHOLD
+    long_residency = (
+        years_in_household_registration >= HOUSEHOLD_REGISTRATION_THRESHOLD_YEARS
+    )
+
+    if long_holding or long_residency:
+        reason_parts = []
+        if long_holding:
+            reason_parts.append(f"ถือครอง {holding_years} ปี ≥ 5 ปี")
+        if long_residency:
+            reason_parts.append(
+                f"ทะเบียนบ้าน {years_in_household_registration} ปี ≥ 1 ปี"
+            )
+        return (
+            TaxChoice.STAMP,
+            "ซื้อมาเอง + " + " หรือ ".join(reason_parts) + " → อากรแสตมป์ 0.5%"
+        )
+
+    return (
+        TaxChoice.SBT,
+        f"ซื้อมาเอง + ถือ {holding_years} ปี < 5 ปี + "
+        f"ทะเบียนบ้าน {years_in_household_registration} ปี < 1 ปี → SBT 3.3%"
+    )
 
 
-def calculate_sbt(
-    appraisal_price: Decimal,
-    sale_price: Decimal,
-) -> tuple[Decimal, str]:
-    """
-    คำนวณ SBT 3.3% × MAX(ราคาขาย, ราคาประเมิน)
-
-    Business Rule: ระบบใช้ MAX สำหรับทุก calculation (conservative estimate)
-
-    Returns:
-        (sbt_amount, formula_text)
-    """
+def calculate_sbt(appraisal_price: Decimal, sale_price: Decimal) -> tuple[Decimal, str]:
     base = max_decimal(sale_price, appraisal_price)
     formula = f"3.3% × MAX(ราคาขาย, ราคาประเมิน) = 3.3% × {base:,.2f}"
     return round_money(base * SBT_EFFECTIVE_RATE), formula
 
 
-def calculate_stamp_duty(
-    appraisal_price: Decimal,
-    sale_price: Decimal,
-) -> tuple[Decimal, str]:
-    """
-    คำนวณอากรแสตมป์ 0.5% × MAX(ราคาขาย, ราคาประเมิน)
-
-    Business Rule: ระบบใช้ MAX สำหรับทุก calculation (conservative estimate)
-
-    Returns:
-        (stamp_amount, formula_text)
-    """
+def calculate_stamp_duty(appraisal_price: Decimal, sale_price: Decimal) -> tuple[Decimal, str]:
     base = max_decimal(sale_price, appraisal_price)
     formula = f"0.5% × MAX(ราคาขาย, ราคาประเมิน) = 0.5% × {base:,.2f}"
     return round_money(base * STAMP_DUTY_RATE), formula
 
 
-# ============================================================================
-# Main orchestrator
-# ============================================================================
-
 def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
-    """
-    คำนวณค่าใช้จ่ายวันโอนทั้งหมด (Workflow 1)
-
-    Args:
-        inp: TransferCalcInput
-
-    Returns:
-        TransferCalcResult พร้อม breakdown ทุกรายการ + audit trail
-    """
+    """Orchestrator คำนวณค่าใช้จ่ายวันโอน"""
     warnings: list[str] = []
-
-    # --- จำนวนปีถือครอง ---
     holding_years = calculate_holding_years(inp.acquisition_year, inp.sale_year)
-
-    # --- 1. ค่าธรรมเนียมโอน — ใช้ MAX(ขาย, ประเมิน) ---
     transfer_fee = calculate_transfer_fee(inp.appraisal_price, inp.sale_price)
     tax_base_max = max_decimal(inp.sale_price, inp.appraisal_price)
-
-    # --- 2. ค่าคำขอ + พยาน ---
     fixed_fee = REQUEST_WITNESS_TOTAL
 
-    # --- 3. WHT ---
+    # WHT
     if inp.seller_type == SellerType.INDIVIDUAL:
         wht_detail = calculate_wht_individual(
             appraisal_price=inp.appraisal_price,
@@ -371,13 +277,14 @@ def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
                 f"(ก่อนเพดาน {wht_detail.total_tax_before_cap:,.2f}, "
                 f"หลังเพดาน {wht_detail.final_tax:,.2f})"
             )
-    else:  # CORPORATE
+    else:
         wht_detail = calculate_wht_corporate(inp.sale_price, inp.appraisal_price)
 
-    # --- 4. ตัดสินใจ SBT vs อากรแสตมป์ ---
+    # SBT vs Stamp
     tax_choice, tax_reason = decide_sbt_or_stamp(
         seller_type=inp.seller_type,
         acquisition_type=inp.acquisition_type,
+        corporate_asset_type=inp.corporate_asset_type,
         holding_years=holding_years,
         years_in_household_registration=inp.years_in_household_registration,
     )
@@ -391,12 +298,12 @@ def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
         sbt_formula = ""
         stamp_amount, stamp_formula = calculate_stamp_duty(inp.appraisal_price, inp.sale_price)
 
-    # --- 5. ค่าจดจำนอง (ถ้ามี) ---
+    # Mortgage
     mortgage_fee = Decimal("0")
     if inp.has_mortgage:
         mortgage_fee = calculate_mortgage_fee(inp.mortgage_amount)
 
-    # --- รวบรวม line items ---
+    # Line items
     line_items: list[CostLineItem] = [
         CostLineItem(
             code="transfer_fee",
@@ -435,7 +342,6 @@ def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
             description="ภาษีธุรกิจเฉพาะ (รวมภาษีท้องถิ่น)",
             formula=sbt_formula,
             amount=sbt_amount,
-            rule_ref="formcal4.asp + การคำนวณภาษีธุรกิจเฉพาะ.pdf",
         ))
     else:
         line_items.append(CostLineItem(
@@ -443,7 +349,6 @@ def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
             description="อากรแสตมป์",
             formula=stamp_formula,
             amount=stamp_amount,
-            rule_ref="formcal5.asp + การคำนวณอากรแสตมป์.pdf",
         ))
 
     if inp.has_mortgage and mortgage_fee > 0:
@@ -452,10 +357,8 @@ def calculate_transfer_costs(inp: TransferCalcInput) -> TransferCalcResult:
             description="ค่าจดจำนอง",
             formula=f"1% × {inp.mortgage_amount:,.2f}",
             amount=mortgage_fee,
-            rule_ref="แนวคิดค่าใช้จ่ายวันโอน.pdf",
         ))
 
-    # --- รวมยอด ---
     total_cost = sum(li.amount for li in line_items)
 
     return TransferCalcResult(

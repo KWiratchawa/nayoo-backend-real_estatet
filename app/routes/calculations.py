@@ -1,10 +1,11 @@
 """Calculation endpoints - WF1 (transfer) + WF2 (leaseback)"""
 from decimal import Decimal
+from typing import Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.tax_engine.models import (
-    AcquisitionType, SellerType,
+    AcquisitionType, SellerType, CorporateAssetType,
     TransferCalcInput, LeasebackCalcInput,
 )
 from app.tax_engine.wf1_transfer import calculate_transfer_costs
@@ -15,8 +16,9 @@ router = APIRouter()
 
 class TransferRequest(BaseModel):
     """WF1: ค่าใช้จ่ายวันโอน"""
-    seller_type: str
-    acquisition_type: str
+    seller_type: str  # "individual" | "corporate"
+    acquisition_type: str  # "bought" | "inherited" | "gift"
+    corporate_asset_type: Optional[str] = None  # "general" | "fixed_asset" (เฉพาะ corporate)
     acquisition_year: int
     sale_year: int
     years_in_household_registration: int = 0
@@ -32,6 +34,7 @@ class LeasebackRequest(BaseModel):
     """WF2: ค่าใช้จ่ายขายฝาก"""
     seller_type: str
     acquisition_type: str
+    corporate_asset_type: Optional[str] = None
     acquisition_year: int
     sale_year: int
     years_in_household_registration: int = 0
@@ -53,6 +56,7 @@ async def calculate_transfer(req: TransferRequest):
         result = calculate_transfer_costs(TransferCalcInput(
             seller_type=SellerType(req.seller_type),
             acquisition_type=AcquisitionType(req.acquisition_type),
+            corporate_asset_type=CorporateAssetType(req.corporate_asset_type) if req.corporate_asset_type else None,
             acquisition_year=req.acquisition_year,
             sale_year=req.sale_year,
             years_in_household_registration=req.years_in_household_registration,
@@ -75,6 +79,7 @@ async def calculate_leaseback(req: LeasebackRequest):
         result = calculate_leaseback_costs(LeasebackCalcInput(
             seller_type=SellerType(req.seller_type),
             acquisition_type=AcquisitionType(req.acquisition_type),
+            corporate_asset_type=CorporateAssetType(req.corporate_asset_type) if req.corporate_asset_type else None,
             acquisition_year=req.acquisition_year,
             sale_year=req.sale_year,
             years_in_household_registration=req.years_in_household_registration,
