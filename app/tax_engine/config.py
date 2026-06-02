@@ -26,8 +26,9 @@ REQUEST_FEE = Decimal("5")
 WITNESS_FEE = Decimal("20")
 REQUEST_WITNESS_TOTAL = REQUEST_FEE + WITNESS_FEE
 
-# ค่าจดจำนอง [F1] = 1% ของวงเงินจำนอง
+# ค่าจดจำนอง [F1] = 1% ของวงเงินจำนอง — สูงสุดไม่เกิน 200,000 บาท ตาม กม.ที่ดิน
 MORTGAGE_FEE_RATE = Decimal("0.01")
+MORTGAGE_FEE_CAP = Decimal("200000")
 
 
 # ============================================================================

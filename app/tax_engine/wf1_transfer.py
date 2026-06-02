@@ -20,6 +20,7 @@ from .config import (
     TRANSFER_FEE_RATE,
     REQUEST_WITNESS_TOTAL,
     MORTGAGE_FEE_RATE,
+    MORTGAGE_FEE_CAP,
     SBT_EFFECTIVE_RATE,
     STAMP_DUTY_RATE,
     SBT_HOLDING_YEAR_THRESHOLD,
@@ -58,7 +59,10 @@ def calculate_transfer_fee(appraisal_price: Decimal, sale_price: Decimal) -> Dec
 
 
 def calculate_mortgage_fee(mortgage_amount: Decimal) -> Decimal:
-    return round_money(mortgage_amount * MORTGAGE_FEE_RATE)
+    """ค่าจดจำนอง = 1% × วงเงินจำนอง (สูงสุด 200,000 บาท)"""
+    raw = mortgage_amount * MORTGAGE_FEE_RATE
+    capped = min(raw, MORTGAGE_FEE_CAP)
+    return round_money(capped)
 
 
 def _get_deduction_rate_bought(holding_years: int) -> Decimal:
