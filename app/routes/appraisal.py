@@ -164,10 +164,11 @@ async def condo_floors(
 ):
     """ดูชั้น + ราคา/ตร.ม. ของอาคารชุด"""
     results = query_sqlite("""
-        SELECT id, floor_no, floor_no_numeric, unit_type, price_per_sqm
+        SELECT id, building_name, building_code, floor_no, floor_no_numeric,
+               unit_type, room_no, price_per_sqm
         FROM condo
         WHERE province_id = ? AND building_name = ?
-        ORDER BY floor_no_numeric
+        ORDER BY floor_no_numeric, unit_type
     """, (province_id, building_name))
 
     if not results:
