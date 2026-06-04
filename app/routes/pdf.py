@@ -1,4 +1,4 @@
-"""PDF report generation - ReportLab + Sarabun Thai font (v2.10)"""
+"""PDF report generation - ReportLab + Sarabun + Thai shaping (v2.11)"""
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -19,19 +19,16 @@ from app.db import get_supabase
 router = APIRouter()
 
 # ============================================================
-# 🆕 v2.10: Thai font registration — Sarabun (bundled with app)
+# Thai font registration
 # ============================================================
 THAI_FONT = "Helvetica"
 THAI_FONT_BOLD = "Helvetica-Bold"
 
-# Look for bundled font first (app/fonts/), then fallback to system fonts
-APP_DIR = Path(__file__).resolve().parent.parent  # app/
+APP_DIR = Path(__file__).resolve().parent.parent
 BUNDLED_FONT_DIR = APP_DIR / "fonts"
 
 _font_candidates = [
-    # Priority 1: Bundled Sarabun in repo
     (BUNDLED_FONT_DIR / "Sarabun-Regular.ttf", BUNDLED_FONT_DIR / "Sarabun-Bold.ttf"),
-    # Priority 2: System fonts (if available)
     (Path("/usr/share/fonts/truetype/tlwg/Sarabun.ttf"), Path("/usr/share/fonts/truetype/tlwg/Sarabun-Bold.ttf")),
     (Path("/usr/share/fonts/truetype/tlwg/Norasi.ttf"), Path("/usr/share/fonts/truetype/tlwg/Norasi-Bold.ttf")),
     (Path("/usr/share/fonts/truetype/tlwg/Garuda.ttf"), Path("/usr/share/fonts/truetype/tlwg/Garuda-Bold.ttf")),
@@ -46,7 +43,10 @@ for regular_path, bold_path in _font_candidates:
                 pdfmetrics.registerFont(TTFont("ThaiFont-Bold", str(bold_path)))
                 THAI_FONT_BOLD = "ThaiFont-Bold"
             else:
-                THAI_FONT_BOLD = "ThaiFont"  # use regular as bold fallback
+                THAI_FONT_BOLD = "ThaiFont"
+            # 🆕 v2.11: Register font family for Bold inside Paragraph <b> tags
+            from reportlab.pdfbase.pdfmetrics import registerFontFamily
+            registerFontFamily('ThaiFont', normal='ThaiFont', bold=THAI_FONT_BOLD)
             print(f"[PDF] ✓ Thai font registered: {regular_path}")
             break
         except Exception as e:
@@ -55,12 +55,11 @@ for regular_path, bold_path in _font_candidates:
 else:
     print("[PDF] ⚠ No Thai font found — Thai characters may not render correctly")
 
-# Brand colors
 BRAND_BLUE = colors.HexColor("#2AABE0")
 BRAND_ORANGE = colors.HexColor("#F05A28")
 
 
-def format_thai_baht(amount) -> str:
+def fmt_baht(amount) -> str:
     if amount is None:
         return "-"
     try:
@@ -70,7 +69,7 @@ def format_thai_baht(amount) -> str:
 
 
 def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
-    """Build PDF using ReportLab"""
+    """Build PDF — ใช้ Paragraph สำหรับ Thai text ทุกที่ (v2.11)"""
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -78,6 +77,9 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
         topMargin=1.5 * cm, bottomMargin=1.5 * cm,
     )
 
+    # ============================================================
+    # Styles
+    # ============================================================
     styles = getSampleStyleSheet()
     style_title = ParagraphStyle(
         'Title', parent=styles['Title'], fontName=THAI_FONT_BOLD,
@@ -92,10 +94,47 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
         fontSize=12, textColor=BRAND_BLUE,
         backColor=colors.HexColor("#f3f4f6"), borderPadding=6, spaceAfter=10, spaceBefore=12,
     )
-    style_normal = ParagraphStyle(
-        'Normal', parent=styles['Normal'], fontName=THAI_FONT, fontSize=10,
+
+    # 🆕 v2.11: Paragraph styles for cell content (Thai shaping)
+    style_cell = ParagraphStyle(
+        'Cell', parent=styles['Normal'], fontName=THAI_FONT,
+        fontSize=10, leading=14,
+    )
+    style_cell_bold = ParagraphStyle(
+        'CellBold', parent=styles['Normal'], fontName=THAI_FONT_BOLD,
+        fontSize=10, leading=14, textColor=colors.HexColor("#475569"),
+    )
+    style_cell_right = ParagraphStyle(
+        'CellRight', parent=styles['Normal'], fontName=THAI_FONT,
+        fontSize=10, leading=14, alignment=TA_RIGHT,
+    )
+    style_cell_right_bold = ParagraphStyle(
+        'CellRightBold', parent=styles['Normal'], fontName=THAI_FONT_BOLD,
+        fontSize=11, leading=14, alignment=TA_RIGHT,
+    )
+    style_cell_header = ParagraphStyle(
+        'CellHeader', parent=styles['Normal'], fontName=THAI_FONT_BOLD,
+        fontSize=10, leading=14, textColor=colors.white,
+    )
+    style_cell_header_right = ParagraphStyle(
+        'CellHeaderRight', parent=styles['Normal'], fontName=THAI_FONT_BOLD,
+        fontSize=10, leading=14, textColor=colors.white, alignment=TA_RIGHT,
+    )
+    style_cell_small = ParagraphStyle(
+        'CellSmall', parent=styles['Normal'], fontName=THAI_FONT,
+        fontSize=9, leading=12,
     )
 
+    # 🆕 v2.11: helper to wrap Thai text in Paragraph
+    def P(text, style=style_cell):
+        """Wrap text in Paragraph for Thai shaping support"""
+        if text is None or text == "":
+            return Paragraph("-", style)
+        return Paragraph(str(text), style)
+
+    # ============================================================
+    # Extract data
+    # ============================================================
     workflow = calc.get("calculation_type", "transfer")
     title = "ค่าใช้จ่ายขายฝาก" if workflow == "leaseback" else "ค่าใช้จ่ายวันโอน"
     listing_no = listing.get("listing_no", "N/A")
@@ -111,24 +150,20 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
     story.append(Paragraph("บ้านพร้อม BY NaYoo — มีครบ จบจริง", style_subtitle))
 
     # ============================================================
-    # 🆕 v2.10: Parties (ลูกค้า / นายหน้า / Listing No / วันที่)
+    # Parties (ลูกค้า / นายหน้า / Listing / Date)
     # ============================================================
     parties_data = [
-        ["ลูกค้า (ผู้ขาย)", seller_name, "Listing No", listing_no],
-        ["นายหน้า", broker_name or "-", "วันที่", today],
+        [P("ลูกค้า (ผู้ขาย)", style_cell_bold), P(seller_name), P("Listing No", style_cell_bold), P(listing_no)],
+        [P("นายหน้า", style_cell_bold), P(broker_name or "-"), P("วันที่", style_cell_bold), P(today)],
     ]
     parties_table = Table(parties_data, colWidths=[3 * cm, 6.5 * cm, 2.5 * cm, 5 * cm])
     parties_table.setStyle(TableStyle([
-        ('FONT', (0, 0), (-1, -1), THAI_FONT, 9),
-        ('FONT', (0, 0), (0, -1), THAI_FONT_BOLD, 9),
-        ('FONT', (2, 0), (2, -1), THAI_FONT_BOLD, 9),
-        ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor("#475569")),
-        ('TEXTCOLOR', (2, 0), (2, -1), colors.HexColor("#475569")),
         ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
         ('LINEBELOW', (0, 0), (-1, 0), 0.3, colors.HexColor("#e5e7eb")),
         ('TOPPADDING', (0, 0), (-1, -1), 6),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(parties_table)
     story.append(Spacer(1, 0.3 * cm))
@@ -155,40 +190,43 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
         "gift": "ให้โดยเสน่หา",
     }.get(listing.get("acquisition_type", ""), "-")
 
-    # 🆕 v2.10: Show area info
     area_rows = []
-    if listing.get("land_total_sq_wah"):
-        area_rows.append([
-            "พื้นที่ดิน",
-            f"{listing.get('land_rai', 0)} ไร่ {listing.get('land_ngan', 0)} งาน {listing.get('land_sq_wah', 0)} ตร.ว. (รวม {listing.get('land_total_sq_wah')} ตร.ว.)"
-        ])
-    elif listing.get("land_rai") or listing.get("land_ngan") or listing.get("land_sq_wah"):
-        area_rows.append([
-            "พื้นที่ดิน",
-            f"{listing.get('land_rai', 0)} ไร่ {listing.get('land_ngan', 0)} งาน {listing.get('land_sq_wah', 0)} ตร.ว."
-        ])
+    if listing.get("land_total_sq_wah") or listing.get("land_rai") or listing.get("land_ngan") or listing.get("land_sq_wah"):
+        total_sqwah = listing.get("land_total_sq_wah")
+        area_text = f"{listing.get('land_rai', 0)} ไร่ {listing.get('land_ngan', 0)} งาน {listing.get('land_sq_wah', 0)} ตร.ว."
+        if total_sqwah:
+            area_text += f" (รวม {total_sqwah} ตร.ว.)"
+        area_rows.append([P("พื้นที่ดิน", style_cell), P(area_text, style_cell_right)])
+
     if listing.get("condo_floor_area_sqm"):
-        area_rows.append(["พื้นที่ห้องชุด", f"{listing.get('condo_floor_area_sqm')} ตร.ม."])
+        area_rows.append([P("พื้นที่ห้องชุด", style_cell), P(f"{listing.get('condo_floor_area_sqm')} ตร.ม.", style_cell_right)])
         if listing.get("condo_building_name"):
-            area_rows.append(["อาคาร / ชั้น", f"{listing.get('condo_building_name')} / {listing.get('condo_floor', '-')}"])
+            area_rows.append([P("อาคาร / ชั้น", style_cell), P(f"{listing.get('condo_building_name')} / {listing.get('condo_floor', '-')}", style_cell_right)])
+
     if listing.get("building_floor_area_sqm"):
-        area_rows.append(["พื้นที่อาคาร", f"{listing.get('building_floor_area_sqm')} ตร.ม."])
+        area_rows.append([P("พื้นที่อาคาร", style_cell), P(f"{listing.get('building_floor_area_sqm')} ตร.ม.", style_cell_right)])
+
+    # 🆕 v2.11: เลขโฉนด/ระวาง (ถ้ามี)
+    if listing.get("title_deed_no"):
+        deed_text = f"เลขที่ {listing.get('title_deed_no')}"
+        if listing.get("land_no"):
+            deed_text += f" / เลขที่ดิน {listing.get('land_no')}"
+        if listing.get("rawang_code"):
+            deed_text += f" / ระวาง {listing.get('rawang_code')}"
+        area_rows.append([P("โฉนดที่ดิน", style_cell), P(deed_text, style_cell_right)])
 
     prop_data = [
-        ["ประเภททรัพย์", property_type_th],
-        ["ผู้ขาย", f"{seller_type_th} ({acquisition_type_th})"],
+        [P("ประเภททรัพย์", style_cell), P(property_type_th, style_cell_right)],
+        [P("ผู้ขาย", style_cell), P(f"{seller_type_th} ({acquisition_type_th})", style_cell_right)],
     ] + area_rows + [
-        ["ราคาขาย", format_thai_baht(listing.get('sale_price'))],
-        ["ราคาประเมิน", format_thai_baht(listing.get('appraisal_price_total'))],
-        ["Tax Base (MAX)", format_thai_baht(calc.get('tax_base'))],
+        [P("ราคาขาย", style_cell), P(fmt_baht(listing.get('sale_price')), style_cell_right)],
+        [P("ราคาประเมิน", style_cell), P(fmt_baht(listing.get('appraisal_price_total')), style_cell_right)],
+        [P("<b>Tax Base (MAX)</b>", style_cell_bold), P(f"<b>{fmt_baht(calc.get('tax_base'))}</b>", style_cell_right_bold)],
     ]
     prop_table = Table(prop_data, colWidths=[5 * cm, 13 * cm])
     prop_table.setStyle(TableStyle([
-        ('FONT', (0, 0), (-1, -1), THAI_FONT, 10),
-        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
         ('LINEBELOW', (0, 0), (-1, -2), 0.5, colors.HexColor("#e5e7eb")),
         ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#fef3c7")),
-        ('FONT', (0, -1), (-1, -1), THAI_FONT_BOLD, 10),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('TOPPADDING', (0, 0), (-1, -1), 6),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
@@ -201,20 +239,18 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
     if workflow == "leaseback":
         story.append(Paragraph("ยอดกำหนดสินไถ่", style_h3))
         redemption_data = [
-            ["ราคาคาดว่าขายออก", format_thai_baht(listing.get('expected_market_price'))],
-            ["ราคาขายฝากที่ตกลง", format_thai_baht(listing.get('sale_price'))],
-            ["หัก ดอกเบี้ยล่วงหน้า", f"- {format_thai_baht(calc.get('advance_interest_amount'))}"],
-            ["หัก ค่าปากถุง 5%", f"- {format_thai_baht(calc.get('mouth_money_fee'))}"],
-            ["เหลือเงิน", format_thai_baht(calc.get('remaining_cash'))],
-            ["ยอดกำหนดสินไถ่", format_thai_baht(calc.get('redemption_amount'))],
+            [P("ราคาคาดว่าขายออก", style_cell), P(fmt_baht(listing.get('expected_market_price')), style_cell_right)],
+            [P("ราคาขายฝากที่ตกลง", style_cell), P(fmt_baht(listing.get('sale_price')), style_cell_right)],
+            [P("หัก ดอกเบี้ยล่วงหน้า", style_cell), P(f"- {fmt_baht(calc.get('advance_interest_amount'))}", style_cell_right)],
+            [P("หัก ค่าปากถุง 5%", style_cell), P(f"- {fmt_baht(calc.get('mouth_money_fee'))}", style_cell_right)],
+            [P("<b>เหลือเงิน</b>", style_cell_bold), P(f"<b>{fmt_baht(calc.get('remaining_cash'))}</b>", style_cell_right_bold)],
+            [P("<b>ยอดกำหนดสินไถ่</b>", style_cell_bold), P(f"<b>{fmt_baht(calc.get('redemption_amount'))}</b>", style_cell_right_bold)],
         ]
         r_table = Table(redemption_data, colWidths=[7 * cm, 11 * cm])
         r_table.setStyle(TableStyle([
-            ('FONT', (0, 0), (-1, -1), THAI_FONT, 10),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
             ('LINEBELOW', (0, 0), (-1, -3), 0.5, colors.HexColor("#e5e7eb")),
             ('BACKGROUND', (0, -2), (-1, -1), colors.HexColor("#fef3c7")),
-            ('FONT', (0, -2), (-1, -1), THAI_FONT_BOLD, 10),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('TOPPADDING', (0, 0), (-1, -1), 6),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ]))
@@ -226,32 +262,29 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
     story.append(Paragraph("รายละเอียดค่าใช้จ่าย", style_h3))
 
     line_items = calc.get("line_items", [])
-    item_rows = [["รายการ", "สูตร", "จำนวน (บาท)"]]
+    item_rows = [[
+        P("รายการ", style_cell_header),
+        P("สูตร", style_cell_header),
+        P("จำนวน (บาท)", style_cell_header_right),
+    ]]
     for it in line_items:
         item_rows.append([
-            it.get('description', ''),
-            it.get('formula', ''),
-            format_thai_baht(it.get('amount')),
+            P(it.get('description', ''), style_cell_small),
+            P(it.get('formula', ''), style_cell_small),
+            P(fmt_baht(it.get('amount')), style_cell_right),
         ])
-    item_rows.append(["รวมค่าใช้จ่ายทั้งหมด", "", format_thai_baht(calc.get('total_cost'))])
+    item_rows.append([
+        P("<b>รวมค่าใช้จ่ายทั้งหมด</b>", style_cell_bold),
+        P(""),
+        P(f"<b>{fmt_baht(calc.get('total_cost'))}</b>", style_cell_right_bold),
+    ])
 
     item_table = Table(item_rows, colWidths=[7.5 * cm, 6.5 * cm, 4 * cm])
     item_table.setStyle(TableStyle([
-        # Header row
         ('BACKGROUND', (0, 0), (-1, 0), BRAND_BLUE),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONT', (0, 0), (-1, 0), THAI_FONT_BOLD, 10),
-        ('ALIGN', (0, 0), (-2, 0), 'LEFT'),
-        ('ALIGN', (-1, 0), (-1, 0), 'RIGHT'),
-        # Body
-        ('FONT', (0, 1), (-1, -2), THAI_FONT, 9),
-        ('ALIGN', (-1, 1), (-1, -1), 'RIGHT'),
         ('LINEBELOW', (0, 0), (-1, -2), 0.5, colors.HexColor("#e5e7eb")),
-        # Total row
         ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#fef3c7")),
-        ('FONT', (0, -1), (-1, -1), THAI_FONT_BOLD, 11),
         ('SPAN', (0, -1), (1, -1)),
-        # Padding
         ('TOPPADDING', (0, 0), (-1, -1), 6),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -259,16 +292,16 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
     story.append(item_table)
 
     # ============================================================
-    # Footer
+    # 🆕 v2.11: Footer — ข้อความทางการ
     # ============================================================
     story.append(Spacer(1, 1 * cm))
     footer_style = ParagraphStyle(
         'Footer', parent=styles['Normal'], fontName=THAI_FONT,
-        fontSize=8, textColor=colors.grey, alignment=TA_CENTER,
+        fontSize=8, textColor=colors.grey, alignment=TA_CENTER, leading=12,
     )
     story.append(Paragraph(
-        "เอกสารนี้สร้างโดยระบบ NaYoo Real Estate — เพื่อประมาณการค่าใช้จ่ายเบื้องต้น<br/>"
-        "ตัวเลขสุดท้ายต้องยืนยันที่สำนักงานที่ดิน",
+        "เอกสารฉบับนี้จัดทำขึ้นเพื่อประมาณการค่าใช้จ่ายในการโอนกรรมสิทธิ์อสังหาริมทรัพย์เบื้องต้นเท่านั้น<br/>"
+        "ค่าใช้จ่ายและภาษีที่แท้จริงให้ยึดตามการประเมินของสำนักงานที่ดิน ณ วันที่ทำนิติกรรม",
         footer_style,
     ))
 
@@ -280,14 +313,12 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
 
 @router.get("/{listing_id}/generate")
 async def generate_pdf(listing_id: str):
-    """Generate PDF + download"""
     sb = get_supabase()
     res = sb.table("listings").select("*").eq("id", listing_id).execute()
     if not res.data:
         raise HTTPException(404, "ไม่พบ listing")
     listing = res.data[0]
 
-    # 🆕 v2.10: Fetch broker name from users table
     broker_name = ""
     user_id = listing.get("user_id")
     if user_id:

@@ -48,6 +48,15 @@ class ListingCreate(BaseModel):
     building_type_code: Optional[str] = None
     building_floor_area_sqm: Optional[float] = None
 
+    # 🆕 v2.11: Source reference IDs (auto จาก lookup, audit trail)
+    # 🆕 v2.12: ทุก source ID เป็น text 8-char จาก CSV (ถ้ามี)
+    source_deed_id: Optional[str] = None
+    parcel_key: Optional[str] = None
+    survey_page_no: Optional[str] = None
+    source_condo_floor_id: Optional[str] = None  # 🆕 v2.12: changed integer → text
+    source_building_type_code: Optional[str] = None
+    source_land_unit_id: Optional[str] = None  # 🆕 v2.12: missing in v2.11
+
     # Prices
     sale_price: float
     appraisal_price_total: float

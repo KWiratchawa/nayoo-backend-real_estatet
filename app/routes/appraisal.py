@@ -106,7 +106,7 @@ async def land_unit_search(
 ):
     """ค้นหาราคาประเมินที่ดิน — filter ด้วย dropdown values"""
     sql = """
-        SELECT id, unit_seq, unit_name,
+        SELECT id, csv_id, unit_seq, unit_name,
                price_min_per_sqwah, price_max_per_sqwah,
                price_min_per_sqm, price_max_per_sqm,
                province_text, district_text, land_office_branch,
@@ -164,11 +164,10 @@ async def condo_floors(
 ):
     """ดูชั้น + ราคา/ตร.ม. ของอาคารชุด"""
     results = query_sqlite("""
-        SELECT id, building_name, building_code, floor_no, floor_no_numeric,
-               unit_type, room_no, price_per_sqm
+        SELECT id, csv_id, floor_no, floor_no_numeric, unit_type, price_per_sqm, building_name, building_code, condo_id, room_no
         FROM condo
         WHERE province_id = ? AND building_name = ?
-        ORDER BY floor_no_numeric, unit_type
+        ORDER BY floor_no_numeric
     """, (province_id, building_name))
 
     if not results:
@@ -184,7 +183,7 @@ async def condo_floors(
 async def list_building_types(province_id: int = Query(...)):
     """69 ประเภทสิ่งปลูกสร้าง + ราคา/ตร.ม."""
     return query_sqlite("""
-        SELECT id, type_code, type_name, type_group, price_per_sqm, remark
+        SELECT id, csv_id, type_code, type_name, type_group, price_per_sqm, remark
         FROM building_type
         WHERE province_id = ?
         ORDER BY type_code
