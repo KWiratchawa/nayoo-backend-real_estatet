@@ -214,9 +214,14 @@ def calculate_leaseback_costs(inp: LeasebackCalcInput) -> LeasebackCalcResult:
         net_proceeds, inp.outstanding_debts, ltv_warning
     )
 
+    # 🆕 v2.9: tax_base = MAX(repo, appraisal) for FE/DB compat
+    _wf2_tax_base = max(inp.repo_price, inp.appraisal_price)
     return LeasebackCalcResult(
         repo_price=inp.repo_price,
         expected_market_price=inp.expected_market_price,
+        tax_base=_wf2_tax_base,
+        sale_price=inp.repo_price,
+        appraisal_price=inp.appraisal_price,
         ltv_ratio=round_money(ltv_ratio, places=4) if False else ltv_ratio.quantize(Decimal("0.0001")),
         ltv_warning=ltv_warning,
         advance_interest_amount=advance_interest,
