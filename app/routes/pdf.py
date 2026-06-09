@@ -1,6 +1,6 @@
-"""PDF report generation - ReportLab + Sarabun + Thai shaping (v2.11)"""
+"""PDF report generation - ReportLab + Sarabun + HarfBuzz Thai shaping (v2.12)"""
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
@@ -9,7 +9,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Flowable
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
@@ -34,16 +34,22 @@ _font_candidates = [
     (Path("/usr/share/fonts/truetype/tlwg/Garuda.ttf"), Path("/usr/share/fonts/truetype/tlwg/Garuda-Bold.ttf")),
 ]
 
+_REG_FONT_PATH = None   # actual file used for ThaiFont (for HarfBuzz)
+_BOLD_FONT_PATH = None   # actual file used for ThaiFont-Bold
+
 for regular_path, bold_path in _font_candidates:
     if regular_path.exists():
         try:
             pdfmetrics.registerFont(TTFont("ThaiFont", str(regular_path)))
             THAI_FONT = "ThaiFont"
+            _REG_FONT_PATH = regular_path
             if bold_path.exists():
                 pdfmetrics.registerFont(TTFont("ThaiFont-Bold", str(bold_path)))
                 THAI_FONT_BOLD = "ThaiFont-Bold"
+                _BOLD_FONT_PATH = bold_path
             else:
                 THAI_FONT_BOLD = "ThaiFont"
+                _BOLD_FONT_PATH = regular_path
             # 🆕 v2.11: Register font family for Bold inside Paragraph <b> tags
             from reportlab.pdfbase.pdfmetrics import registerFontFamily
             registerFontFamily('ThaiFont', normal='ThaiFont', bold=THAI_FONT_BOLD)
@@ -57,6 +63,171 @@ else:
 
 BRAND_BLUE = colors.HexColor("#2AABE0")
 BRAND_ORANGE = colors.HexColor("#F05A28")
+
+# Thailand timezone (UTC+7, no DST) — server (Render) runs in UTC,
+# so datetime.now() would show the wrong day near midnight Thai time.
+TH_TZ = timezone(timedelta(hours=7))
+
+# ============================================================
+# 🆕 v2.12: HarfBuzz Thai shaping
+# ------------------------------------------------------------
+# ReportLab does NOT apply OpenType GPOS, so Sarabun tone marks
+# collide with upper vowels (e.g. ซื้อ, เบื้อง, ที่). We shape the
+# text with HarfBuzz to get the correct per-glyph (x_offset,
+# y_offset, x_advance), then draw each glyph individually.
+# If uharfbuzz is unavailable we fall back to plain Paragraph
+# (the previous behaviour) — no regression.
+# ============================================================
+try:
+    import uharfbuzz as hb
+    HB_AVAILABLE = True
+except Exception as _hb_err:  # pragma: no cover
+    HB_AVAILABLE = False
+    print(f"[PDF] uharfbuzz not available ({_hb_err}); Thai shaping disabled — using ReportLab fallback")
+
+# rl_font_name -> (hb_font, upem, gid2char)
+HB_FONTS: dict = {}
+
+
+def _build_hb_font(path):
+    """Load a font into HarfBuzz and build a glyph-id → character map.
+
+    Shaped glyph_infos give glyph IDs; to draw them with ReportLab's
+    drawString we map each GID back to a Unicode char via the font's
+    cmap. This covers every glyph our text can reach (incl. the
+    nikhahit/sara-aa that SARA AM ำ decomposes into during shaping).
+    """
+    blob = hb.Blob.from_file_path(str(path))
+    face = hb.Face(blob)
+    upem = face.upem
+    font = hb.Font(face)
+    gid2char = {}
+    codepoints = (
+        list(range(0x20, 0x7F))      # ASCII
+        + list(range(0xA0, 0x100))   # Latin-1 (incl. × U+00D7)
+        + list(range(0x0E00, 0x0E80))  # Thai
+        + [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026]  # punctuation
+    )
+    for cp in codepoints:
+        try:
+            gid = font.get_nominal_glyph(cp)
+        except Exception:
+            gid = None
+        if gid:  # 0 / None = not in font
+            gid2char.setdefault(gid, chr(cp))
+    return font, upem, gid2char
+
+
+if HB_AVAILABLE and THAI_FONT == "ThaiFont" and _REG_FONT_PATH is not None:
+    try:
+        HB_FONTS["ThaiFont"] = _build_hb_font(_REG_FONT_PATH)
+        HB_FONTS["ThaiFont-Bold"] = _build_hb_font(_BOLD_FONT_PATH or _REG_FONT_PATH)
+        print("[PDF] ✓ HarfBuzz Thai shaping enabled")
+    except Exception as _e:
+        print(f"[PDF] ⚠ HarfBuzz init failed ({_e}); using ReportLab fallback")
+        HB_FONTS = {}
+
+# Shaping is usable only if HB loaded AND we have a real Thai font registered
+_USE_SHAPING = HB_AVAILABLE and bool(HB_FONTS)
+
+# Disable the 'ccmp' feature: Sarabun's ccmp substitutes stacked tone marks
+# with pre-positioned variant glyphs that have NO cmap entry (so we couldn't
+# map them back to a character to draw). With ccmp off, marks stay as their
+# nominal glyphs and HarfBuzz lifts them via GPOS y_offset instead — which we
+# can both resolve and draw correctly.
+_HB_FEATURES = {"ccmp": False}
+
+
+class ShapedText(Flowable):
+    """A flowable that renders one cell of (Thai) text using HarfBuzz
+    shaping, so tone marks and vowels are positioned correctly.
+
+    Reads font / size / leading / colour / alignment from a ReportLab
+    ParagraphStyle so it can be a drop-in for Paragraph inside Tables.
+    Supports word-wrap on spaces, explicit <br/> breaks, and strips the
+    redundant <b> tags used by the bold styles.
+    """
+
+    def __init__(self, text, style):
+        super().__init__()
+        self.style = style
+        self.font_name = style.fontName
+        self.font_size = style.fontSize
+        self.leading = style.leading or (style.fontSize * 1.2)
+        self.color = getattr(style, "textColor", None) or colors.black
+        self.align = getattr(style, "alignment", TA_LEFT)
+        self._hb_font, self._upem, self._gid2char = HB_FONTS[self.font_name]
+        self.text = self._clean(text)
+        self.lines = [self.text]
+        self.avail_width = 0.0
+
+    @staticmethod
+    def _clean(raw):
+        t = str(raw)
+        for br in ("<br/>", "<br />", "<br>"):
+            t = t.replace(br, "\n")
+        return t.replace("<b>", "").replace("</b>", "")
+
+    def _shape(self, s):
+        """Return list of (gid, x_offset, y_offset, x_advance) in font units."""
+        if not s:
+            return []
+        buf = hb.Buffer()
+        buf.add_str(s)
+        buf.guess_segment_properties()
+        hb.shape(self._hb_font, buf, _HB_FEATURES)
+        out = []
+        for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
+            out.append((info.codepoint, pos.x_offset, pos.y_offset, pos.x_advance))
+        return out
+
+    def _text_width(self, s):
+        scale = self.font_size / self._upem
+        return sum(adv for _, _, _, adv in self._shape(s)) * scale
+
+    def _wrap_lines(self, text, avail_width):
+        lines = []
+        for para in text.split("\n"):
+            words = para.split(" ")
+            cur = ""
+            for w in words:
+                trial = w if cur == "" else cur + " " + w
+                if cur == "" or self._text_width(trial) <= avail_width:
+                    cur = trial
+                else:
+                    lines.append(cur)
+                    cur = w
+            lines.append(cur)
+        return lines or [""]
+
+    def wrap(self, avail_width, avail_height):
+        self.avail_width = avail_width
+        self.lines = self._wrap_lines(self.text, avail_width)
+        self.width = avail_width
+        self.height = self.leading * max(1, len(self.lines))
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        scale = self.font_size / self._upem
+        c.setFont(self.font_name, self.font_size)
+        c.setFillColor(self.color)
+        for i, line in enumerate(self.lines):
+            glyphs = self._shape(line)
+            line_w = sum(adv for _, _, _, adv in glyphs) * scale
+            if self.align == TA_RIGHT:
+                start_x = self.avail_width - line_w
+            elif self.align == TA_CENTER:
+                start_x = (self.avail_width - line_w) / 2.0
+            else:
+                start_x = 0.0
+            baseline = self.height - self.font_size - i * self.leading
+            pen_x = start_x
+            for gid, x_off, y_off, x_adv in glyphs:
+                ch = self._gid2char.get(gid)
+                if ch is not None and ch != " ":
+                    c.drawString(pen_x + x_off * scale, baseline + y_off * scale, ch)
+                pen_x += x_adv * scale
 
 
 def fmt_baht(amount) -> str:
@@ -125,11 +296,13 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
         fontSize=9, leading=12,
     )
 
-    # 🆕 v2.11: helper to wrap Thai text in Paragraph
+    # 🆕 v2.12: render Thai text via HarfBuzz shaping (correct mark
+    # positioning); fall back to Paragraph when shaping is unavailable.
     def P(text, style=style_cell):
-        """Wrap text in Paragraph for Thai shaping support"""
         if text is None or text == "":
-            return Paragraph("-", style)
+            text = "-"
+        if _USE_SHAPING and style.fontName in HB_FONTS:
+            return ShapedText(str(text), style)
         return Paragraph(str(text), style)
 
     # ============================================================
@@ -138,7 +311,7 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
     workflow = calc.get("calculation_type", "transfer")
     title = "ค่าใช้จ่ายขายฝาก" if workflow == "leaseback" else "ค่าใช้จ่ายวันโอน"
     listing_no = listing.get("listing_no", "N/A")
-    today = datetime.now().strftime("%d/%m/%Y")
+    today = datetime.now(TH_TZ).strftime("%d/%m/%Y")
     seller_name = listing.get("seller_name") or "-"
 
     story = []
@@ -299,7 +472,7 @@ def build_pdf(listing: dict, calc: dict, broker_name: str = "") -> bytes:
         'Footer', parent=styles['Normal'], fontName=THAI_FONT,
         fontSize=8, textColor=colors.grey, alignment=TA_CENTER, leading=12,
     )
-    story.append(Paragraph(
+    story.append(P(
         "เอกสารฉบับนี้จัดทำขึ้นเพื่อประมาณการค่าใช้จ่ายในการโอนกรรมสิทธิ์อสังหาริมทรัพย์เบื้องต้นเท่านั้น<br/>"
         "ค่าใช้จ่ายและภาษีที่แท้จริงให้ยึดตามการประเมินของสำนักงานที่ดิน ณ วันที่ทำนิติกรรม",
         footer_style,
